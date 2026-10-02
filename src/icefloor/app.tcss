@@ -1,0 +1,86 @@
+Screen {
+    background: $surface;
+}
+
+#nav {
+    width: 24;
+    min-width: 18;
+    border-right: solid $primary 50%;
+    padding: 0 1;
+    background: $panel;
+}
+
+#nav:focus {
+    border-right: solid $accent;
+}
+
+#main {
+    width: 1fr;
+}
+
+#crumb {
+    padding: 0 1;
+    height: 1;
+    background: $panel;
+    color: $text-muted;
+}
+
+#filter {
+    margin: 0 1;
+    height: 3;
+}
+
+#body {
+    padding: 0 1 1 1;
+    width: 1fr;
+}
+
+.block-title {
+    margin: 1 0 0 0;
+    color: $accent;
+}
+
+.kv {
+    padding: 0 0 0 1;
+}
+
+.note {
+    padding: 1;
+    color: $text-muted;
+    border: round $primary 40%;
+    margin: 1 0 0 0;
+}
+
+.footnote {
+    color: $text-muted;
+    padding: 0 0 0 1;
+}
+
+.spark {
+    height: 3;
+    margin: 0 0 0 1;
+    width: 100%;
+}
+
+BlockTable {
+    height: auto;
+    max-height: 32;
+    margin: 0 0 0 0;
+}
+
+HelpScreen {
+    align: center middle;
+}
+
+#help-body {
+    width: 62;
+    height: auto;
+    padding: 1 2;
+    border: round $accent;
+    background: $panel;
+}
+
+.note.error {
+    border: round $error;
+    color: $text;
+}
