@@ -5,22 +5,44 @@ both in one place, with the link between them walkable: pick a data file out of 
 Iceberg snapshot and drop straight into that file's row groups, encodings and column
 statistics.
 
-## How to use it
+## Install
 
-If you are an end user, the easiest path is to run it from a checked-out copy of the
-repository:
+Needs Python 3.12+. With [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# 1) install dependencies for this project
-uv sync
+uv tool install icefloor          # puts `icefloor` on your PATH
+uvx icefloor path/to/table        # or run once without installing
+```
 
-# 2) inspect a table or file
-uv run icefloor path/to/table
-uv run icefloor path/to/file.parquet
-uv run icefloor path/to/parts/
+`pipx install icefloor` works too. To install the latest unreleased code:
 
-# 3) load a table from a configured PyIceberg catalog
-uv run icefloor db.events -c prod
+```bash
+uv tool install git+https://github.com/gkoenig/icefloor
+```
+
+Local files need nothing more. To load tables through a PyIceberg catalog (`-c`), add
+the extra for your backend:
+
+| Extra | For |
+| --- | --- |
+| `sql` | SQL catalog backed by SQLite |
+| `s3` | tables on S3 (`s3fs`) |
+| `glue` | AWS Glue catalog |
+
+```bash
+uv tool install 'icefloor[s3,glue]'
+```
+
+Catalogs are configured the usual PyIceberg way, in `~/.pyiceberg.yaml` or `PYICEBERG_*`
+environment variables.
+
+## How to use it
+
+```bash
+icefloor path/to/table
+icefloor path/to/file.parquet
+icefloor path/to/parts/
+icefloor db.events -c prod        # table from a configured PyIceberg catalog
 ```
 
 `icefloor` auto-detects what you passed in:
@@ -34,9 +56,9 @@ uv run icefloor db.events -c prod
 Useful options:
 
 ```bash
-uv run icefloor --list-sections path/to/table
-uv run icefloor -s snapshots path/to/table
-uv run icefloor path/to/table -c prod
+icefloor --list-sections path/to/table
+icefloor -s snapshots path/to/table
+icefloor path/to/table -c prod
 ```
 
 `--list-sections` prints the available section names and exits. `-s` jumps directly to a
@@ -80,6 +102,8 @@ responsive and a section that fails to read reports the error in place.
 
 ## Sample data
 
+From a clone of the repo:
+
 ```bash
 uv run python tests/fixture.py fixtures
 uv run icefloor fixtures/warehouse/sales/events
@@ -90,4 +114,26 @@ plus loose Parquet files to poke at.
 
 ## Development
 
-See `CLAUDE.md` for the architecture and `uv run pytest -q` for the checks.
+```bash
+git clone https://github.com/gkoenig/icefloor && cd icefloor
+uv sync
+uv run icefloor path/to/table
+uv run pytest -q
+```
+
+See `CLAUDE.md` for the architecture.
+
+### Releasing
+
+Bump `version` in `pyproject.toml`, commit, then tag and push:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The `release` workflow builds, tests and publishes the tag to PyPI. It uses trusted
+publishing, so no token is stored in the repo.
+
+## License
+
+MIT
