@@ -28,13 +28,15 @@ the extra for your backend:
 | `sql` | SQL catalog backed by SQLite |
 | `s3` | tables on S3 (`s3fs`) |
 | `glue` | AWS Glue catalog |
+| `azure` | tables on Azure Blob / ADLS Gen2 (`adlfs`), e.g. Databricks Unity Catalog |
 
 ```bash
 uv tool install 'icefloor[s3,glue]'
 ```
 
-Catalogs are configured the usual PyIceberg way, in `~/.pyiceberg.yaml` or `PYICEBERG_*`
-environment variables.
+REST catalogs need no extra beyond the storage one. Catalogs are configured the usual
+PyIceberg way, in `~/.pyiceberg.yaml` or `PYICEBERG_*` environment variables. See
+[Databricks Unity Catalog](#databricks-unity-catalog) for a worked example.
 
 ## How to use it
 
@@ -64,6 +66,238 @@ icefloor path/to/table -c prod
 `--list-sections` prints the available section names and exits. `-s` jumps directly to a
 particular section. Once the UI opens, use the keyboard controls shown below to browse,
 filter and drill down into the data.
+
+## Databricks Unity Catalog
+
+icefloor can browse Iceberg tables registered in Databricks Unity Catalog (UC). It talks
+to the **Iceberg REST catalog that Databricks hosts inside every workspace**, so there's no
+server to deploy:
+
+```
+https://<workspace-host>/api/2.1/unity-catalog/iceberg-rest
+```
+
+A UC table name has three parts, `catalog.schema.table`. icefloor splits it like this:
+
+| UC name part | Where it goes |
+| --- | --- |
+| `catalog` (`<uc-catalog>`) | `warehouse` in the catalog config |
+| `schema.table` (`<schema>.<table>`) | the icefloor target |
+
+### How access works
+
+Two separate connections are involved:
+
+1. **icefloor → workspace (catalog).** icefloor authenticates with a Databricks token and
+   asks UC for the table. UC answers with the location of the table's `metadata.json`
+   and a **short-lived SAS token** scoped to the table's storage path. This is called
+   *credential vending*.
+2. **icefloor → storage account (data).** Using that SAS token, icefloor reads
+   `metadata.json`, the manifest lists, the manifests and Parquet footers directly from
+   ADLS. It never reads Parquet data pages.
+
+So you need a Databricks identity with the right UC grants. You do **not** need an Azure
+role, account key or SAS of your own on the storage account.
+
+### Prerequisites
+
+Work through these once. The first three usually need a workspace or metastore admin.
+
+**1. External data access is enabled on the metastore.**
+Without it, UC refuses to vend credentials to any engine outside Databricks. A metastore
+admin turns it on in Catalog Explorer → ⚙ → Metastore → *External data access*.
+
+**2. Your identity has the grants.**
+Use the identity whose token icefloor will send: your user, or a service principal.
+
+```sql
+GRANT USE CATALOG ON CATALOG <uc-catalog> TO `you@example.com`;
+GRANT USE SCHEMA, SELECT, EXTERNAL USE SCHEMA ON SCHEMA <uc-catalog>.<schema> TO `you@example.com`;
+```
+
+`EXTERNAL USE SCHEMA` is the one that's easy to miss. It is separate from `SELECT`, it is
+**not** included in `ALL PRIVILEGES`, and without it the table may be listed but not
+loaded (HTTP 403). Check what you have:
+
+```sql
+SHOW GRANTS `you@example.com` ON SCHEMA <uc-catalog>.<schema>;
+```
+
+**3. The table is readable as Iceberg.**
+It must be one of these:
+
+- a **managed Iceberg table** (`CREATE TABLE … USING ICEBERG`), or
+- a **Delta table with UniForm**:
+  `'delta.universalFormat.enabledFormats' = 'iceberg'`. UniForm writes the Iceberg
+  metadata asynchronously after each Delta commit, so it can lag the newest commit
+  briefly.
+
+Plain Delta tables are invisible to the Iceberg endpoint. Check with:
+
+```sql
+DESCRIBE TABLE EXTENDED <uc-catalog>.<schema>.<table>;   -- look at Provider / Table Properties
+```
+
+**4. Your machine can reach both endpoints over HTTPS (443).**
+
+- the workspace host (`adb-<id>.<n>.azuredatabricks.net`): blocked by
+  workspace **IP access lists** if your IP isn't allowed;
+- the storage account, `<account>.dfs.core.windows.net`: blocked if the account accepts
+  only **private endpoints** or selected networks.
+
+If only the workspace is reachable, the table loads but every section shows an error.
+On a VPN, check that private DNS zones also resolve inside WSL2 or containers
+(`nslookup <account>.dfs.core.windows.net`).
+
+**5. icefloor is installed with the Azure extra.**
+
+```bash
+uv tool install 'icefloor[azure]'      # or, in a clone:  uv sync --extra azure
+```
+
+The extra brings in `adlfs`. That's the only Azure filesystem that understands the SAS
+tokens UC vends. Without it icefloor stops with `adlfs is not installed`.
+
+### Choose how to authenticate
+
+Every option ends with icefloor sending a bearer token to the workspace. Pick one.
+
+| Option | Good for | Token lifetime |
+| --- | --- | --- |
+| A. Databricks CLI login (OAuth, your user) | interactive use on your laptop | ~1h, refreshed by the CLI |
+| B. Personal access token (PAT) | quick tests, workspaces without OAuth | what you set, up to the admin's limit |
+| C. Service principal (OAuth M2M) | automation, shared machines | fetched automatically per run |
+
+All options use the same catalog entry in `~/.pyiceberg.yaml`. Credentials are best
+passed as environment variables, where each config key maps to
+`PYICEBERG_CATALOG__<NAME>__<KEY>`:
+
+```yaml
+catalog:
+  uc:
+    type: rest
+    uri: https://<workspace-host>/api/2.1/unity-catalog/iceberg-rest
+    warehouse: <<your-UC-catalog>>
+```
+
+One entry covers one UC catalog. Add another entry (e.g. `uc_prod`) per catalog you browse.
+
+#### A. Databricks CLI login (recommended for people)
+
+`databricks auth login` runs a browser OAuth login. It saves the workspace as a profile in
+`~/.databrickscfg` and caches tokens in `~/.databricks/token-cache.json`. PyIceberg can't
+read that cache, but `databricks auth token` prints a fresh access token from it,
+refreshing it if needed. Hand that token to icefloor:
+
+```bash
+# once per machine (and again when the refresh token expires):
+databricks auth login --host https://<workspace-host> --profile dev
+
+# each time:
+export PYICEBERG_CATALOG__UC__TOKEN=$(databricks auth token --profile dev | jq -r .access_token)
+icefloor <schema>.<table> -c uc
+```
+
+To keep nothing workspace-specific in `~/.pyiceberg.yaml` at all, put this function in
+your `~/.bashrc` or `~/.zshrc`. It takes the host from the CLI profile and builds the
+catalog config from environment variables, for that one process only:
+
+```bash
+# usage: icefloor-uc <cli-profile> <uc-catalog> <schema.table> [icefloor options]
+icefloor-uc() {
+  local profile=$1 uc_catalog=$2; shift 2
+  local host token
+  host=$(databricks auth describe --profile "$profile" -o json | jq -r '.details.host // empty')
+  token=$(databricks auth token --profile "$profile" | jq -r '.access_token // empty')
+  if [[ -z $host || -z $token ]]; then
+    echo "icefloor-uc: no host/token for profile '$profile' - run: databricks auth login --profile $profile" >&2
+    return 1
+  fi
+  PYICEBERG_CATALOG__UC__TYPE=rest \
+  PYICEBERG_CATALOG__UC__URI="${host%/}/api/2.1/unity-catalog/iceberg-rest" \
+  PYICEBERG_CATALOG__UC__WAREHOUSE="$uc_catalog" \
+  PYICEBERG_CATALOG__UC__TOKEN="$token" \
+    icefloor -c uc "$@"
+}
+
+icefloor-uc databricks-profilename catalog schema.table
+icefloor-uc databricks-profilename catalog schema.table --list-sections
+```
+
+The token exists only in that icefloor process's environment. It isn't written to a
+file and doesn't appear in shell history. The function needs `jq`. Without it, swap each
+`jq -r <path>` for a small `python -c 'import json,sys; …'` one-liner.
+
+#### B. Personal access token
+
+Create one in the workspace under *your avatar → Settings → Developer → Access tokens*.
+Then:
+
+```bash
+export PYICEBERG_CATALOG__UC__TOKEN=dapi...
+icefloor <schema>.<table> -c uc
+```
+
+PATs can live for weeks. Prefer A or C if your workspace allows it, and never commit one
+in `~/.pyiceberg.yaml` dotfiles.
+
+#### C. Service principal (OAuth machine-to-machine)
+
+Create an OAuth secret for the service principal (account console → Service principals
+→ *Secrets*), grant the SP the privileges from prerequisite 2, then:
+
+```bash
+export PYICEBERG_CATALOG__UC__CREDENTIAL='<client-id>:<client-secret>'
+export PYICEBERG_CATALOG__UC__OAUTH2_SERVER_URI=https://<workspace-host>/oidc/v1/token
+export PYICEBERG_CATALOG__UC__SCOPE=all-apis
+icefloor <schema>.<table> -c uc
+```
+
+PyIceberg exchanges the client credentials for a token on every start.
+
+### Verify step by step
+
+If something fails, these `curl` calls show which layer is broken. They reuse the token
+from above:
+
+```bash
+HOST=https://<workspace-host>
+AUTH="Authorization: Bearer $PYICEBERG_CATALOG__UC__TOKEN"
+
+# 1. endpoint + token: JSON with "defaults"/"overrides" means OK
+curl -s -H "$AUTH" "$HOST/api/2.1/unity-catalog/iceberg-rest/v1/config?warehouse=<uc-catalog>"
+
+# 2. grants + table type: <table> must be listed
+curl -s -H "$AUTH" "$HOST/api/2.1/unity-catalog/iceberg-rest/v1/catalogs/<uc-catalog>/namespaces/<schema>/tables"
+```
+
+If call 2 returns 404, take the `prefix` value from call 1's `overrides` and use it in
+place of `catalogs/<uc-catalog>`. Then, from icefloor:
+
+```bash
+icefloor <schema>.<table> -c uc --list-sections   # catalog side OK, no UI
+icefloor <schema>.<table> -c uc -s manifests      # storage side OK if this shows rows
+```
+
+| Result | Layer | Fix |
+| --- | --- | --- |
+| curl times out | network to workspace | VPN, proxy, workspace IP access list |
+| HTTP 401 / `rejected the credentials` | token | expired or wrong token; run `databricks auth login` again; for C check `oauth2-server-uri` and `scope` |
+| HTTP 403 / `denied access` | UC permissions | `EXTERNAL USE SCHEMA` missing, or external data access off (prerequisites 1–2) |
+| `not found in catalog` | naming / table type | target is `schema.table`, catalog goes in `warehouse`; table may be Delta without UniForm |
+| `adlfs is not installed` | install | `uv tool install 'icefloor[azure]'` |
+| `--list-sections` works, every section shows an error | network to storage | storage firewall / private endpoint, DNS for `*.dfs.core.windows.net` |
+| sections start failing after ~1h in one session | vended SAS expired | quit and restart icefloor |
+
+### Limitations
+
+- **Read-only.** icefloor never writes to the table or the catalog.
+- **Credentials are fetched once per start.** Neither the Databricks token nor the
+  vended SAS token is refreshed while icefloor runs. Restart for a fresh pair.
+- **Azure only, as tested.** UC on AWS or GCP vends S3 or GCS credentials instead. That
+  should work with the `s3` extra (or `gcsfs`) but hasn't been tried.
+- **No live CI.** The Unity Catalog path is covered by offline tests of the error
+  handling only. Real workspaces may differ in details such as the REST `prefix`.
 
 ## What it shows
 
