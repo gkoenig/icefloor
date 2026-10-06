@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+from pyiceberg.utils.config import Config
 from textual.widgets import OptionList
 
+from icefloor import meta
 from icefloor.app import BrowseScreen, IcefloorApp
-from icefloor.meta import IcebergSource, ParquetDirSource, ParquetSource, load
+from icefloor.meta import IcebergSource, LoadError, ParquetDirSource, ParquetSource, load
 from icefloor.views import BlockTable
 
 from .fixture import build_all
@@ -96,3 +100,57 @@ async def test_snapshot_scoping(paths):
         scoped = len(source.section("datafiles")[0].rows)
         source.snapshot_id = None
         assert scoped <= len(source.section("datafiles")[0].rows)
+
+
+@pytest.fixture
+def fixture_catalog(paths, monkeypatch) -> str:
+    """Expose the fixture's SQLite catalog `test`, configured purely through env vars."""
+    warehouse = os.path.dirname(os.path.dirname(paths["iceberg"]))
+    monkeypatch.setenv("PYICEBERG_CATALOG__TEST__TYPE", "sql")
+    monkeypatch.setenv("PYICEBERG_CATALOG__TEST__URI", f"sqlite:///{warehouse}/catalog.db")
+    # PyIceberg snapshots its config at import time; rebuild it so the env vars count.
+    monkeypatch.setattr("pyiceberg.catalog._ENV_CONFIG", Config())
+    return "test"
+
+
+def test_load_from_catalog(fixture_catalog):
+    assert isinstance(load("sales.events", fixture_catalog), IcebergSource)
+
+
+@pytest.mark.parametrize(
+    ("target", "catalog"), [("sales.nope", "test"), ("main.sales.events", "test"), ("x.y", "nope")]
+)
+def test_catalog_errors_are_load_errors(fixture_catalog, target, catalog):
+    with pytest.raises(LoadError):
+        load(target, catalog)
+
+
+def test_azure_table_without_adlfs_is_load_error(fixture_catalog, monkeypatch):
+    from pyiceberg.catalog.sql import SqlCatalog
+
+    real_load = SqlCatalog.load_table
+
+    def load_on_azure(self, identifier):
+        table = real_load(self, identifier)
+        table.metadata = table.metadata.model_copy(
+            update={"location": "abfss://c@acct.dfs.core.windows.net/t"}
+        )
+        return table
+
+    monkeypatch.setattr(SqlCatalog, "load_table", load_on_azure)
+    monkeypatch.setattr(meta.importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(LoadError, match="icefloor\\[azure\\]"):
+        load("sales.events", fixture_catalog)
+
+
+@pytest.mark.parametrize("error", ["UnauthorizedError", "OAuthError", "ForbiddenError"])
+def test_catalog_auth_errors_are_load_errors(fixture_catalog, monkeypatch, error):
+    from pyiceberg import exceptions
+    from pyiceberg.catalog.sql import SqlCatalog
+
+    def refuse(self, identifier):
+        raise getattr(exceptions, error)("nope")
+
+    monkeypatch.setattr(SqlCatalog, "load_table", refuse)
+    with pytest.raises(LoadError):
+        load("sales.events", fixture_catalog)

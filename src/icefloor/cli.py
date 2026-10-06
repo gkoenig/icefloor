@@ -15,7 +15,7 @@ TARGET can be:
   a directory of Parquet    data/warehouse/events/
   an Iceberg table dir      warehouse/db/events        (holds metadata/)
   an Iceberg metadata file  warehouse/db/events/metadata/v3.metadata.json
-  a catalog table name      db.events --catalog prod
+  a catalog table name      db.events --catalog prod   (Unity Catalog: schema.table)
 """
 
 
