@@ -1,5 +1,9 @@
 # icefloor
 
+[![ci](https://github.com/gkoenig/icefloor/actions/workflows/ci.yml/badge.svg)](https://github.com/gkoenig/icefloor/actions/workflows/ci.yml)
+[![security](https://github.com/gkoenig/icefloor/actions/workflows/codeql.yml/badge.svg)](https://github.com/gkoenig/icefloor/actions/workflows/codeql.yml)
+[![release](https://github.com/gkoenig/icefloor/actions/workflows/release.yml/badge.svg)](https://github.com/gkoenig/icefloor/actions/workflows/release.yml)
+
 A terminal UI for reading **Iceberg table metadata** and **Parquet file metadata** —
 both in one place, with the link between them walkable: pick a data file out of an
 Iceberg snapshot and drop straight into that file's row groups, encodings and column
