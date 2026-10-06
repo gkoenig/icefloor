@@ -42,6 +42,9 @@ s3 = [
 glue = [
     "pyiceberg[glue]>=0.12.0",
 ]
+azure = [
+    "pyiceberg[adlfs]>=0.12.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.9,<0.12.0"]

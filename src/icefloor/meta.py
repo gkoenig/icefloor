@@ -7,6 +7,7 @@ those into Textual widgets.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -1060,6 +1061,9 @@ class LoadError(Exception):
     pass
 
 
+_AZURE_SCHEMES = ("abfs://", "abfss://", "wasb://", "wasbs://")
+
+
 def _iceberg_metadata_json(path: str) -> str | None:
     """Return the newest metadata.json for a table directory, if any."""
     meta_dir = path if os.path.basename(path) == "metadata" else os.path.join(path, "metadata")
@@ -1075,15 +1079,54 @@ def _iceberg_metadata_json(path: str) -> str | None:
     return max(candidates, key=os.path.getmtime)
 
 
+def _load_from_catalog(target: str, catalog: str):
+    from pyiceberg.catalog import load_catalog
+    from pyiceberg.exceptions import (
+        ForbiddenError,
+        NoSuchNamespaceError,
+        NoSuchTableError,
+        OAuthError,
+        UnauthorizedError,
+    )
+
+    # A REST catalog authenticates inside load_catalog, so both calls share one handler.
+    try:
+        table = load_catalog(catalog).load_table(target)
+    except ValueError as exc:
+        raise LoadError(f"Catalog {catalog!r} is not usable: {exc}") from exc
+    except (NoSuchTableError, NoSuchNamespaceError) as exc:
+        raise LoadError(
+            f"{target!r} not found in catalog {catalog!r}: {exc}. "
+            "With Unity Catalog, `warehouse` names the UC catalog; pass schema.table."
+        ) from exc
+    except (UnauthorizedError, OAuthError) as exc:
+        raise LoadError(
+            f"Catalog {catalog!r} rejected the credentials: {exc}. "
+            "Check `token`, or `credential` + `oauth2-server-uri` + `scope`."
+        ) from exc
+    except ForbiddenError as exc:
+        raise LoadError(
+            f"Catalog {catalog!r} denied access to {target!r}: {exc}. "
+            "Unity Catalog needs USE CATALOG, USE SCHEMA, SELECT and EXTERNAL USE SCHEMA."
+        ) from exc
+
+    # Without adlfs PyIceberg falls back to PyArrow's Azure filesystem, which ignores the
+    # per-account SAS tokens a REST catalog vends; every read then fails with an opaque
+    # auth error, so stop here with the fix instead.
+    if table.metadata.location.startswith(_AZURE_SCHEMES) and not importlib.util.find_spec("adlfs"):
+        raise LoadError(
+            "Table lives on Azure storage but adlfs is not installed. "
+            "Install the extra: uv tool install 'icefloor[azure]'"
+        )
+    return table
+
+
 def load(target: str, catalog: str | None = None):
     """Load `target` as an Iceberg table, a Parquet file, or a Parquet dir."""
     from pyiceberg.table import StaticTable
 
     if catalog:
-        from pyiceberg.catalog import load_catalog
-
-        cat = load_catalog(catalog)
-        return IcebergSource(cat.load_table(target), target)
+        return IcebergSource(_load_from_catalog(target, catalog), target)
 
     if target.startswith(
         ("s3://", "s3a://", "gs://", "abfs://", "abfss://", "http://", "https://")
