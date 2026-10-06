@@ -127,11 +127,31 @@ pre-emptively.
 <!-- Which OSes/terminals must this work on? True-colour assumed, or do you need to
      survive a 16-colour / no-unicode terminal? Minimum terminal width? -->
 
-## Data and catalogs — (fill in)
+## Data and catalogs
 
-<!-- Which catalogs (REST, Glue, Hive, Nessie, SQL)? Which object stores and how is auth
-     provided? Any table that must never be written to? Largest table/file size the TUI
-     has to stay responsive on? -->
+Full rationale lives in CLAUDE.md → "Catalog support". The rules for code:
+
+- **Catalogs.** SQL (SQLite) is the tested one. REST is the target for real use, with
+  Databricks Unity Catalog on Azure as the reference setup. Glue ships as an extra but is
+  untested. Hive and Nessie are unsupported until a real target needs them. Add their
+  extra then, not before.
+- **Object stores.** Local disk always. ADLS through the `azure` extra (`adlfs`), S3
+  through `s3`. GCS has no extra yet.
+- **Auth.** Only through PyIceberg config (`~/.pyiceberg.yaml` or
+  `PYICEBERG_CATALOG__<NAME>__<KEY>`). Prefer credentials vended by a REST catalog over
+  static storage keys. Never add CLI flags or code paths that accept secrets, and never
+  log or display a config value that could hold one (`token`, `credential`, `*.sas-token`,
+  `*.account-key`, `*secret*`). The Properties section shows *table* properties only.
+- **Writes.** None, to any table. Don't call `append`, `overwrite`, `delete`, any
+  `commit`/transaction API, or a catalog create/drop/rename. The only exception is
+  `tests/fixture.py`, which builds its own throwaway table.
+- **Tests stay offline.** Catalog tests use the fixture's SQLite catalog configured
+  through env vars, plus monkeypatched errors. Never require a live REST endpoint or cloud
+  credentials in `pytest`.
+- **Size.** No hard number set yet. Working assumption: thousands of manifests and
+  tens of thousands of data files must stay responsive. That means section work stays on
+  the worker thread, and nothing loads every manifest when the active section doesn't need it.
+  **(fill in a real upper bound once measured against a production table)**
 
 ## Limits and hard rules
 

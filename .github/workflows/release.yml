@@ -4,20 +4,24 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   pypi:
+    needs: ci
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write  # trusted publishing; no API token in secrets
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Tag must match pyproject version
         run: test "${GITHUB_REF_NAME#v}" = "$(uv version --short)"
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run pytest -q
       - run: uv build
       - run: uv publish

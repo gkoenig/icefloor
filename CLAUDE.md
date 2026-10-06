@@ -61,6 +61,58 @@ row's path as a new Parquet screen, `"snapshot"` scopes the Iceberg file views.
 **Adding a section** means adding one `Section` to `sections()` and one
 `_sec_<key>()` method returning `Block`s. No UI change needed.
 
+## Catalog support (`-c NAME`)
+
+`meta._load_from_catalog` calls `pyiceberg.catalog.load_catalog(NAME).load_table(target)`
+and wraps the result in the same `IcebergSource` used for local tables. From there on,
+every read goes through `table.io`. icefloor itself holds **no** catalog or credential
+logic. Endpoint, auth, TLS and storage credentials all come from PyIceberg config
+(`~/.pyiceberg.yaml`, `PYICEBERG_HOME`, `PYICEBERG_CATALOG__<NAME>__<KEY>` env vars).
+
+**Two access paths.** The catalog returns only a pointer to `metadata.json`. Metadata,
+manifests and Parquet footers are then read straight from object storage. That needs either
+credentials the catalog vends with the table (REST + `X-Iceberg-Access-Delegation`,
+which PyIceberg sends by default) or storage credentials in config (`s3.*`, `adls.*`,
+`gcs.*`).
+
+**Status per backend:**
+
+| Backend | Status | Extra |
+| --- | --- | --- |
+| SQL (SQLite) | covered by the test suite | `sql` |
+| REST, Databricks Unity Catalog on Azure | documented in README, not CI-tested (needs a live workspace) | `azure` |
+| Glue + S3 | extras shipped, untested | `glue`, `s3` |
+| Hive, GCS, other REST + ADLS setups | untested; would need `pyiceberg[hive]` / `[gcsfs]` | none yet |
+
+**Error contract.** `_load_from_catalog` turns user-fixable failures into `LoadError`
+(exit 2, one line with a hint). These are unknown or misconfigured catalog (`ValueError`),
+missing table or namespace, 401 and OAuth failures, 403, and an Azure table location without
+`adlfs` installed. Anything else, such as network errors, falls through to `cli.main`'s
+generic handler (exit 1).
+
+**Boundaries and limitations:**
+- **Read-only.** icefloor never calls a write or commit API. Keep it that way.
+- **Offline by default.** Catalog code is imported lazily, only when `-c` is passed.
+  Local paths must never touch the network or need credentials, and no catalog extra
+  may become a core dependency.
+- **No credential flags.** Config is PyIceberg's, unchanged. Don't add `--token` style
+  options; secrets would land in shell history.
+- **Vended credentials are fetched once**, at table load. PyIceberg 0.12 does not refresh
+  them, so a session that outlives the SAS/STS token (often about 1h) starts failing per
+  section. `r` does not help. Restart icefloor.
+- **Unity Catalog specifics.** The URI is
+  `https://<workspace>/api/2.1/unity-catalog/iceberg-rest` and `warehouse` is the UC
+  catalog, so the target is `schema.table`. One config entry covers one UC catalog. The
+  service needs `EXTERNAL USE SCHEMA` plus external data access turned on for the
+  metastore. Only managed Iceberg tables or Delta with UniForm are visible. UniForm's
+  Iceberg metadata is generated asynchronously and can lag the newest Delta commit.
+- **ADLS needs `adlfs`.** PyArrow's Azure filesystem ignores the per-account
+  `adls.sas-token.<account>` keys that vending produces, hence the guard in
+  `_load_from_catalog`.
+- **Network.** The machine needs HTTPS to both the catalog host and the storage
+  endpoint. If only the first is reachable, the table loads and every section shows a
+  `.error` note.
+
 ## Things that bit us (don't re-break these)
 
 - `pyarrow`'s `row_group(i).total_byte_size` is the **uncompressed** total. Real on-disk
@@ -73,6 +125,11 @@ row's path as a new Parquet screen, `"snapshot"` scopes the Iceberg file views.
   freeze the UI. Mount widgets only via `app.call_from_thread`.
 - A section that raises is surfaced as a `.error` note, never as an empty pane — the
   test suite asserts this.
+- PyIceberg reads its config **once, at import** (`pyiceberg.catalog._ENV_CONFIG`).
+  Tests that set `PYICEBERG_CATALOG__*` env vars must also rebuild that object (see the
+  `fixture_catalog` fixture).
+- `SqlCatalog` scopes tables by catalog *name*. The fixture creates them under `test`, so
+  a config entry for that DB under any other name finds nothing.
 
 ## Your notes
 
